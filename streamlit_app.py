@@ -1,96 +1,120 @@
 import streamlit as st
 import requests
 import pandas as pd
+import json
 from datetime import datetime
 import folium
 from streamlit_folium import st_folium
 
-# --- ΡΥΘΜΙΣΕΙΣ ---
+# --- 1. ΡΥΘΜΙΣΕΙΣ ΣΕΛΙΔΑΣ ---
 st.set_page_config(page_title="PeRGio Fishing Pro", layout="wide")
 
-def calculate_pergio_score(p_val, p_trend, moon, wind, onshore, clouds):
+# --- 2. ΛΟΓΙΚΗ ΥΠΟΛΟΓΙΣΜΟΥ SCORE (VIDALIS LOGIC) ---
+def calculate_pergio_score(p_val, p_trend, moon, wind, clouds, description):
     score = 0
-    # 1. Πίεση (40%)
+    # Βαρομετρική Πίεση (40%)
     if p_val < 1010: score += 20
     elif 1011 <= p_val <= 1017: score += 10
     if p_trend == "falling": score += 20
-    # 2. Σελήνη (30%) - Εδώ χρησιμοποιούμε τη φωτεινότητα από το API
+    
+    # Σελήνη (30%) - Υπολογίζεται ως μέση τιμή 0.5 αν δεν υπάρχει One Call API
     if moon <= 0.15: score += 30
     elif moon >= 0.85: score += 20
     else: score += 10
-    # 3. Άνεμος & Αφρουδιά (20%)
-    if 3 <= wind <= 5: score += 10
-    if onshore: score += 10
-    # 4. Συννεφιά (10%)
+    
+    # Άνεμος (20%) - Ιδανικά 3-5 m/s (περίπου 3-4 Bf)
+    if 3 <= wind <= 5: score += 20
+    
+    # Συννεφιά (10%)
     if clouds > 50: score += 10
-    return score
-
-# --- ΛΗΨΗ ΔΕΔΟΜΕΝΩΝ 5 ΗΜΕΡΩΝ / 3 ΩΡΩΝ ---
-def get_forecast(lat, lon, api_key):
-    # Το δωρεάν API της OpenWeather δίνει πρόβλεψη 5 ημερών ανά 3 ώρες
-    url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={api_key}&units=metric&lang=el"
-    res = requests.get(url).json()
     
-    forecast_list = []
-    prev_pressure = res['list'][0]['main']['pressure']
-    
-    for item in res['list']:
-        curr_pressure = item['main']['pressure']
-        trend = "falling" if curr_pressure < prev_pressure else "stable"
+    # Ποινή για έντονη βροχή
+    if "βροχή" in description.lower() or "καταιγίδα" in description.lower():
+        score -= 15
         
-        # Υπολογισμός Score
-        # Σημείωση: Το 5-day forecast δεν δίνει moon phase απευθείας, 
-        # χρησιμοποιούμε μια μέση τιμή ή το data από το One Call αν υπάρχει.
-        score = calculate_pergio_score(
-            curr_pressure, trend, 0.5, item['wind']['speed'], True, item['clouds']['all']
-        )
+    return max(0, score)
+
+# --- 3. ΦΟΡΤΩΣΗ ΜΟΝΙΜΩΝ ΤΟΠΟΘΕΣΙΩΝ ---
+def load_places():
+    try:
+        with open('places.json', 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {"Αθήνα": [37.98, 23.72]} # Default αν λείπει το αρχείο
+
+# --- 4. ΚΥΡΙΟ GUI ---
+st.title("🎣 PeRGio Fishing Pro")
+st.markdown("---")
+
+# Sidebar για επιλογή αποθηκευμένων μερών
+saved_places = load_places()
+st.sidebar.header("📍 Τα Μέρη μου")
+selected_name = st.sidebar.selectbox("Επιλέξτε Σημείο:", list(saved_places.keys()))
+lat, lon = saved_places[selected_name]
+
+# Εμφάνιση Χάρτη (Static Marker)
+st.subheader(f"Πρόβλεψη για: {selected_name}")
+m = folium.Map(location=[lat, lon], zoom_start=10)
+folium.Marker([lat, lon], popup=selected_name, icon=folium.Icon(color='red', icon='anchor', prefix='fa')).add_to(m)
+st_folium(m, height=250, width=None, scrolling=False)
+
+# --- 5. ΛΗΨΗ ΔΕΔΟΜΕΝΩΝ & ΑΝΑΛΥΣΗ ---
+if st.button("🚀 Εμφάνιση Ανάλυσης Εβδομάδας"):
+    try:
+        api_key = st.secrets["OPENWEATHER_API_KEY"]
+        # API Call για Forecast 5 ημερών / 3 ωρών
+        url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={api_key}&units=metric&lang=el"
+        res = requests.get(url).json()
         
-        forecast_list.append({
-            "Χρόνος": datetime.fromtimestamp(item['dt']).strftime('%d/%m %H:%M'),
-            "Score %": score,
-            "Πίεση (hPa)": curr_pressure,
-            "Άνεμος (m/s)": item['wind']['speed'],
-            "Βροχή": item.get('weather', [{}])[0].get('description', 'Καθαρός'),
-            "Σύννεφα %": item['clouds']['all']
-        })
-        prev_pressure = curr_pressure
+        # Ομαδοποίηση δεδομένων ανά ημέρα
+        days_dict = {}
+        prev_p = res['list'][0]['main']['pressure']
         
-    return pd.DataFrame(forecast_list), res['city']
+        for item in res['list']:
+            dt = datetime.fromtimestamp(item['dt'])
+            day_label = dt.strftime('%A %d/%m') # π.χ. Monday 23/03
+            
+            if day_label not in days_dict:
+                days_dict[day_label] = []
+            
+            curr_p = item['main']['pressure']
+            trend = "falling" if curr_p < prev_p else "stable"
+            desc = item['weather'][0]['description']
+            
+            # Υπολογισμός Score
+            score = calculate_pergio_score(curr_p, trend, 0.5, item['wind']['speed'], item['clouds']['all'], desc)
+            
+            days_dict[day_label].append({
+                "ώρα": dt.strftime('%H:%M'),
+                "score": score,
+                "καιρός": desc,
+                "άνεμος": item['wind']['speed'],
+                "πίεση": curr_p
+            })
+            prev_p = curr_p
 
-# --- GUI ---
-st.title("🎣 PeRGio Fishing Pro: 5-Day Detail")
+        # Εμφάνιση αποτελεσμάτων με Expanders
+        for day, measurements in days_dict.items():
+            with st.expander(f"📅 {day}"):
+                cols = st.columns(len(measurements))
+                for i, m_data in enumerate(measurements):
+                    with cols[i]:
+                        # Χρώμα βάσει score
+                        s = m_data['score']
+                        color = "green" if s >= 75 else "orange" if s >= 40 else "red"
+                        
+                        st.markdown(f"**{m_data['ώρα']}**")
+                        st.markdown(f"### :{color}[{s}%]")
+                        st.caption(f"{m_data['καιρός']}")
+                        st.caption(f"💨 {m_data['άνεμος']}m/s")
+                        st.caption(f"⏲️ {m_data['πίεση']}")
 
-# Χάρτης και Επιλογή
-m = folium.Map(location=[37.98, 23.72], zoom_start=7)
-m.add_child(folium.LatLngPopup())
-map_output = st_folium(m, height=300, width=None)
+        # Ανατολή/Δύση
+        sunrise = datetime.fromtimestamp(res['city']['sunrise']).strftime('%H:%M')
+        sunset = datetime.fromtimestamp(res['city']['sunset']).strftime('%H:%M')
+        st.divider()
+        st.info(f"☀️ Ανατολή: {sunrise} | 🌙 Δύση: {sunset} | 🏙️ Πόλη: {res['city']['name']}")
 
-lat, lon = 37.98, 23.72
-if map_output['last_clicked']:
-    lat, lon = map_output['last_clicked']['lat'], map_output['last_clicked']['lng']
-
-if st.button("Ανάλυση Εβδομάδας (Ανά 3 Ώρες)"):
-    api_key = st.secrets["OPENWEATHER_API_KEY"]
-    df, city_info = get_forecast(lat, lon, api_key)
-    
-    # 1. Ανατολή & Δύση
-    sunrise = datetime.fromtimestamp(city_info['sunrise']).strftime('%H:%M')
-    sunset = datetime.fromtimestamp(city_info['sunset']).strftime('%H:%M')
-    
-    st.info(f"☀️ Ανατολή: {sunrise} | 🌙 Δύση: {sunset} | 📍 Περιοχή: {city_info['name']}")
-    
-    # 2. Γράφημα Score
-    st.subheader("Πρόβλεψη PeRGio Score")
-    st.line_chart(df.set_index("Χρόνος")["Score %"])
-    
-    # 3. Αναλυτικός Πίνακας (Statistics)
-    st.subheader("Αναλυτικά Στατιστικά (Ανά 3 Ώρες)")
-    
-    # Χρωματική σήμανση για τη βροχή και το σκορ
-    def highlight_cells(val):
-        if isinstance(val, int) and val >= 80: return 'background-color: #2ecc71'
-        if "βροχή" in str(val).lower(): return 'background-color: #3498db'
-        return ''
-
-    st.dataframe(df.style.applymap(highlight_cells))
-    
+    except Exception as e:
+        st.error("Σφάλμα: Βεβαιωθείτε ότι το API Key είναι σωστό στα Secrets.")
+        
