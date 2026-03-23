@@ -1,6 +1,5 @@
 import streamlit as st
 import requests
-import pandas as pd
 import json
 from datetime import datetime
 import folium
@@ -9,123 +8,104 @@ from streamlit_folium import st_folium
 # --- 1. ΡΥΘΜΙΣΕΙΣ ΣΕΛΙΔΑΣ ---
 st.set_page_config(page_title="PeRGio Fishing Pro", layout="wide")
 
-# Λεξικό Μετάφρασης Ημερών
 days_translation = {
     "Monday": "Δευτέρα", "Tuesday": "Τρίτη", "Wednesday": "Τετάρτη",
     "Thursday": "Πέμπτη", "Friday": "Παρασκευή", "Saturday": "Σάββατο", "Sunday": "Κυριακή"
 }
 
-# --- 2. ΛΟΓΙΚΗ ΥΠΟΛΟΓΙΣΜΟΥ SCORE (VIDALIS LOGIC) ---
-def calculate_pergio_score(p_val, p_trend, moon, wind, clouds, description):
+# --- 2. ΔΙΑΧΕΙΡΙΣΗ ΜΝΗΜΗΣ ΤΟΠΟΘΕΣΙΩΝ ---
+if 'my_places' not in st.session_state:
+    try:
+        with open('places.json', 'r', encoding='utf-8') as f:
+            st.session_state.my_places = json.load(f)
+    except:
+        st.session_state.my_places = {"Πειραιάς": [37.94, 23.64]}
+
+# --- 3. ΛΟΓΙΚΗ SCORE ---
+def calculate_pergio_score(p_val, p_trend, wind, clouds, description):
     score = 0
-    # Βαρομετρική Πίεση (40%)
     if p_val < 1010: score += 20
     elif 1011 <= p_val <= 1017: score += 10
     if p_trend == "falling": score += 20
-    
-    # Σελήνη (30%) - Default 0.5 (προς το παρόν)
-    if moon <= 0.15: score += 30
-    elif moon >= 0.85: score += 20
-    else: score += 10
-    
-    # Άνεμος (20%) - Ιδανικά 3-5 m/s
-    if 3 <= wind <= 5: score += 20
-    
-    # Συννεφιά (10%)
+    if 3 <= wind <= 5: score += 20 # Ιδανικά Μποφόρ
     if clouds > 50: score += 10
-    
-    # Ποινή για βροχή/καταιγίδα
-    desc_lower = description.lower()
-    if "βροχή" in desc_lower or "καταιγίδα" in desc_lower or "rain" in desc_lower:
-        score -= 15
-        
-    return max(0, score)
+    if "βροχή" in description.lower() or "rain" in description.lower(): score -= 15
+    return max(0, min(100, score + 30)) # +30 βάσει Σελήνης (μέσος όρος)
 
-# --- 3. ΦΟΡΤΩΣΗ ΜΟΝΙΜΩΝ ΤΟΠΟΘΕΣΙΩΝ ---
-def load_places():
-    try:
-        with open('places.json', 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception:
-        # Αν αποτύχει, επιστρέφει ένα default σημείο
-        return {"Πειραιάς": [37.94, 23.64]}
+# --- 4. SIDEBAR: ΔΙΑΧΕΙΡΙΣΗ ΣΗΜΕΙΩΝ ---
+st.sidebar.header("📍 Διαχείριση Σημείων")
 
-# --- 4. ΚΥΡΙΟ GUI ---
-st.title("🎣 PeRGio Fishing Pro")
-st.markdown("---")
+# Επιλογή υπάρχοντος
+selected_name = st.sidebar.selectbox("Τα μέρη μου:", list(st.session_state.my_places.keys()))
+lat_init, lon_init = st.session_state.my_places[selected_name]
 
-# Sidebar
-saved_places = load_places()
-st.sidebar.header("📍 Τα Μέρη μου")
-selected_name = st.sidebar.selectbox("Επιλέξτε Σημείο:", list(saved_places.keys()))
-lat, lon = saved_places[selected_name]
+st.sidebar.divider()
 
-# Εμφάνιση Χάρτη - ΔΙΟΡΘΩΣΗ TYPEERROR
-st.subheader(f"Πρόβλεψη για: {selected_name}")
-m = folium.Map(location=[lat, lon], zoom_start=10)
-folium.Marker(
-    [lat, lon], 
-    popup=selected_name, 
-    icon=folium.Icon(color='red', icon='anchor', prefix='fa')
-).add_to(m)
+# Προσθήκη νέου
+new_place_name = st.sidebar.text_input("Όνομα νέου σημείου:")
+save_button = st.sidebar.button("💾 Αποθήκευση Επιλεγμένου Σημείου")
 
-# Χρήση σταθερού width και height για σταθερότητα
-st_folium(m, height=300, width=700, key="fishing_map")
+# --- 5. ΚΥΡΙΟ GUI & ΧΑΡΤΗΣ ---
+st.title(" 🎣 PeRGio Fishing Pro")
 
-# --- 5. ΛΗΨΗ ΔΕΔΟΜΕΝΩΝ & ΑΝΑΛΥΣΗ ---
-if st.button("🚀 Εμφάνιση Ανάλυσης Εβδομάδας"):
+st.subheader("Επιλέξτε σημείο στον χάρτη ή από το Sidebar")
+m = folium.Map(location=[lat_init, lon_init], zoom_start=10)
+folium.Marker([lat_init, lon_init], popup=selected_name, icon=folium.Icon(color='red')).add_to(m)
+m.add_child(folium.LatLngPopup())
+
+# Επιστροφή δεδομένων από τον χάρτη
+map_data = st_folium(m, height=350, width=800, key="main_map")
+
+# Λογική Αποθήκευσης
+current_lat, current_lon = lat_init, lon_init
+if map_data['last_clicked']:
+    current_lat = map_data['last_clicked']['lat']
+    current_lon = map_data['last_clicked']['lng']
+    st.write(f"Επιλεγμένες συντεταγμένες: `{current_lat:.4f}, {current_lon:.4f}`")
+
+if save_button and new_place_name:
+    st.session_state.my_places[new_place_name] = [current_lat, current_lon]
+    st.sidebar.success(f"Το σημείο '{new_place_name}' προστέθηκε προσωρινά!")
+    st.sidebar.warning("⚠️ Για μόνιμη αποθήκευση, ενημερώστε το αρχείο places.json στο GitHub.")
+
+# --- 6. ΑΝΑΛΥΣΗ ---
+if st.button("🚀 Εκτέλεση Ανάλυσης"):
     try:
         api_key = st.secrets["OPENWEATHER_API_KEY"]
-        url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={api_key}&units=metric&lang=el"
+        url = f"https://api.openweathermap.org/data/2.5/forecast?lat={current_lat}&lon={current_lon}&appid={api_key}&units=metric&lang=el"
         res = requests.get(url).json()
         
-        if res.get("cod") != "200":
-            st.error(f"API Error: {res.get('message')}")
-        else:
-            days_dict = {}
-            prev_p = res['list'][0]['main']['pressure']
+        days_dict = {}
+        prev_p = res['list'][0]['main']['pressure']
+        
+        for item in res['list']:
+            dt = datetime.fromtimestamp(item['dt'])
+            day_label = f"{days_translation.get(dt.strftime('%A'), dt.strftime('%A'))} {dt.strftime('%d/%m')}"
             
-            for item in res['list']:
-                dt = datetime.fromtimestamp(item['dt'])
-                eng_day = dt.strftime('%A')
-                day_label = f"{days_translation.get(eng_day, eng_day)} {dt.strftime('%d/%m')}"
-                
-                if day_label not in days_dict:
-                    days_dict[day_label] = []
-                
-                curr_p = item['main']['pressure']
-                trend = "falling" if curr_p < prev_p else "stable"
-                desc = item['weather'][0]['description']
-                
-                score = calculate_pergio_score(curr_p, trend, 0.5, item['wind']['speed'], item['clouds']['all'], desc)
-                
-                days_dict[day_label].append({
-                    "ώρα": dt.strftime('%H:%M'),
-                    "score": score,
-                    "καιρός": desc,
-                    "άνεμος": item['wind']['speed'],
-                    "πίεση": curr_p
-                })
-                prev_p = curr_p
+            if day_label not in days_dict: days_dict[day_label] = []
+            
+            curr_p = item['main']['pressure']
+            score = calculate_pergio_score(curr_p, "falling" if curr_p < prev_p else "stable", item['wind']['speed'], item['clouds']['all'], item['weather'][0]['description'])
+            
+            days_dict[day_label].append({
+                "ώρα": dt.strftime('%H:%M'),
+                "score": score,
+                "καιρός": item['weather'][0]['description'],
+                "άνεμος": item['wind']['speed']
+            })
+            prev_p = curr_p
 
-            # Εμφάνιση με Expanders
-            for day, measurements in days_dict.items():
-                with st.expander(f"📅 {day}"):
-                    cols = st.columns(len(measurements))
-                    for i, m_data in enumerate(measurements):
-                        with cols[i]:
-                            s = m_data['score']
-                            color = "green" if s >= 75 else "orange" if s >= 40 else "red"
-                            st.markdown(f"**{m_data['ώρα']}**")
-                            st.markdown(f"### :{color}[{s}%]")
-                            st.caption(f"{m_data['καιρός']}")
-                            st.caption(f"💨 {m_data['άνεμος']}m/s")
-
-            # Ανατολή/Δύση
-            sunrise = datetime.fromtimestamp(res['city']['sunrise']).strftime('%H:%M')
-            sunset = datetime.fromtimestamp(res['city']['sunset']).strftime('%H:%M')
-            st.divider()
-            st.info(f"☀️ Ανατολή: {sunrise} | 🌙 Δύση: {sunset} | 📍 {res['city']['name']}")
-
+        for day, data in days_dict.items():
+            with st.expander(f"📅 {day}"):
+                cols = st.columns(len(data))
+                for i, d in enumerate(data):
+                    with cols[i]:
+                        color = "green" if d['score'] >= 75 else "orange" if d['score'] >= 45 else "red"
+                        st.markdown(f"**{d['ώρα']}**\n### :{color}[{d['score']}%]\n{d['καιρός']}")
     except Exception as e:
-        st.error(f"Παρουσιάστηκε πρόβλημα: {str(e)}")
+        st.error(f"Σφάλμα API: Ελέγξτε τα Secrets.")
+
+# --- 7. ΕΞΑΓΩΓΗ ΓΙΑ GITHUB (Μόνιμη Αποθήκευση) ---
+if st.sidebar.checkbox("Εμφάνιση JSON για GitHub"):
+    st.sidebar.code(json.dumps(st.session_state.my_places, indent=4, ensure_ascii=False))
+    
